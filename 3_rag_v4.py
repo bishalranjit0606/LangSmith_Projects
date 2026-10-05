@@ -9,14 +9,24 @@ from dotenv import load_dotenv
 from langsmith import traceable
 
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 
+os.environ["LANGCHAIN_PROJECT"] = "rag chatbot v4"
+
 load_dotenv()
+
+OPENROUTER_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in .env file")
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 PDF_PATH = "islr.pdf"  # change to your file
 INDEX_ROOT = Path(".indices")
@@ -36,7 +46,7 @@ def split_documents(docs, chunk_size=1000, chunk_overlap=150):
 
 @traceable(name="build_vectorstore")
 def build_vectorstore(splits, embed_model_name: str):
-    emb = OpenAIEmbeddings(model=embed_model_name)
+    emb = HuggingFaceEmbeddings(model_name=embed_model_name)
     return FAISS.from_documents(splits, emb)
 
 # ----------------- cache key / fingerprint -----------------
@@ -61,7 +71,7 @@ def _index_key(pdf_path: str, chunk_size: int, chunk_overlap: int, embed_model_n
 # ----------------- explicitly traced load/build runs -----------------
 @traceable(name="load_index", tags=["index"])
 def load_index_run(index_dir: Path, embed_model_name: str):
-    emb = OpenAIEmbeddings(model=embed_model_name)
+    emb = HuggingFaceEmbeddings(model_name=embed_model_name)
     return FAISS.load_local(
         str(index_dir),
         emb,
@@ -88,7 +98,7 @@ def load_or_build_index(
     pdf_path: str,
     chunk_size: int = 1000,
     chunk_overlap: int = 150,
-    embed_model_name: str = "text-embedding-3-small",
+    embed_model_name: str = EMBED_MODEL,
     force_rebuild: bool = False,
 ):
     key = _index_key(pdf_path, chunk_size, chunk_overlap, embed_model_name)
@@ -100,7 +110,12 @@ def load_or_build_index(
         return build_index_run(pdf_path, index_dir, chunk_size, chunk_overlap, embed_model_name)
 
 # ----------------- model, prompt, and pipeline -----------------
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+llm = ChatOpenAI(
+    model="openrouter/free",
+    temperature=0.3,
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "Answer ONLY from the provided context. If not found, say you don't know."),
@@ -111,7 +126,7 @@ def format_docs(docs):
     return "\n\n".join(d.page_content for d in docs)
 
 @traceable(name="setup_pipeline", tags=["setup"])
-def setup_pipeline(pdf_path: str, chunk_size=1000, chunk_overlap=150, embed_model_name="text-embedding-3-small", force_rebuild=False):
+def setup_pipeline(pdf_path: str, chunk_size=1000, chunk_overlap=150, embed_model_name=EMBED_MODEL, force_rebuild=False):
     return load_or_build_index(
         pdf_path=pdf_path,
         chunk_size=chunk_size,
@@ -126,7 +141,7 @@ def setup_pipeline_and_query(
     question: str,
     chunk_size: int = 1000,
     chunk_overlap: int = 150,
-    embed_model_name: str = "text-embedding-3-small",
+    embed_model_name: str = EMBED_MODEL,
     force_rebuild: bool = False,
 ):
     vectorstore = setup_pipeline(pdf_path, chunk_size, chunk_overlap, embed_model_name, force_rebuild)
@@ -145,7 +160,16 @@ def setup_pipeline_and_query(
 
 # ----------------- CLI -----------------
 if __name__ == "__main__":
-    print("PDF RAG ready. Ask a question (or Ctrl+C to exit).")
-    q = input("\nQ: ").strip()
-    ans = setup_pipeline_and_query(PDF_PATH, q)
-    print("\nA:", ans)
+    print("PDF RAG ready.")
+
+    while True:
+        question = input("\nQ: ").strip()
+
+        if question.lower() in ["exit", "quit"]:
+            break
+
+        if not question:
+            continue
+
+        answer = setup_pipeline_and_query(PDF_PATH, question)
+        print("\nA:", answer)

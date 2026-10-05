@@ -1,23 +1,33 @@
 # pip install -U langgraph langchain-openai pydantic python-dotenv langsmith
 
 import operator
+import os
 from typing import TypedDict, Annotated, List
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from langsmith import traceable
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 
 # ---------- Setup ----------
+os.environ["LANGCHAIN_PROJECT"] = "langgraph"
+
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+if not os.getenv("GROQ_API_KEY"):
+    raise ValueError("GROQ_API_KEY not found in .env file")
+
+model = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
 
 # ---------- Structured schema & model ----------
 class EvaluationSchema(BaseModel):
     feedback: str = Field(description="Detailed feedback for the essay")
-    score: int = Field(description="Score out of 10", ge=0, le=10)
+    score: float = Field(description="Score out of 10", ge=0, le=10)
+
+def _score(out: EvaluationSchema) -> int:
+    return max(0, min(10, int(round(out.score))))
 
 structured_model = model.with_structured_output(EvaluationSchema)
 
@@ -59,7 +69,7 @@ def evaluate_language(state: UPSCState):
         "and assign a score out of 10.\n\n" + state["essay"]
     )
     out = structured_model.invoke(prompt)
-    return {"language_feedback": out.feedback, "individual_scores": [out.score]}
+    return {"language_feedback": out.feedback, "individual_scores": [_score(out)]}
 
 @traceable(name="evaluate_analysis_fn", tags=["dimension:analysis"], metadata={"dimension": "analysis"})
 def evaluate_analysis(state: UPSCState):
@@ -68,7 +78,7 @@ def evaluate_analysis(state: UPSCState):
         "and assign a score out of 10.\n\n" + state["essay"]
     )
     out = structured_model.invoke(prompt)
-    return {"analysis_feedback": out.feedback, "individual_scores": [out.score]}
+    return {"analysis_feedback": out.feedback, "individual_scores": [_score(out)]}
 
 @traceable(name="evaluate_thought_fn", tags=["dimension:clarity"], metadata={"dimension": "clarity_of_thought"})
 def evaluate_thought(state: UPSCState):
@@ -77,7 +87,7 @@ def evaluate_thought(state: UPSCState):
         "and assign a score out of 10.\n\n" + state["essay"]
     )
     out = structured_model.invoke(prompt)
-    return {"clarity_feedback": out.feedback, "individual_scores": [out.score]}
+    return {"clarity_feedback": out.feedback, "individual_scores": [_score(out)]}
 
 @traceable(name="final_evaluation_fn", tags=["aggregate"])
 def final_evaluation(state: UPSCState):
@@ -120,7 +130,7 @@ if __name__ == "__main__":
             "tags": ["essay", "langgraph", "evaluation"],
             "metadata": {
                 "essay_length": len(essay2),
-                "model": "gpt-4o-mini",
+                "model": "openai/gpt-oss-120b",
                 "dimensions": ["language", "analysis", "clarity"],
             },
         },
